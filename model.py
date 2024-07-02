@@ -8,7 +8,9 @@ from datasets import Dataset, Audio, load_metric
 from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec2Processor
 
 
-print("My numpy version is: ", np.__version__)
+print(torch.cuda.is_available())
+if torch.cuda.is_available():
+    torch.set_default_device("cuda")
 
 def preprocess_audio(file_path):
     file_name = os.path.basename(file_path)
