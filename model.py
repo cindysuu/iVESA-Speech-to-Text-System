@@ -138,18 +138,9 @@ class DataCollatorCTCWithPadding:
    
 data_collator = DataCollatorCTCWithPadding(processor=processor, padding=True)
 
-from transformers import Wav2Vec2ForCTC
 
-model = Wav2Vec2ForCTC.from_pretrained(
-    "facebook/wav2vec2-base",
-    ctc_loss_reduction="mean",
-    pad_token_id=processor.tokenizer.pad_token_id,
-)
-
-model.gradient_checkpointing_enable()
-model.freeze_feature_encoder()
-
-from transformers import TrainingArguments
+from transformers import TrainingArguments, Trainer, Wav2Vec2ForCTC
+import optuna
 
 training_args = TrainingArguments(
     output_dir="./wav2vec2-base-ivesa",
@@ -168,7 +159,6 @@ training_args = TrainingArguments(
     save_total_limit=2,
 )
 
-from transformers import Trainer
 
 wer_metric = load("wer", trust_remote_code=True)
 
@@ -186,19 +176,89 @@ def compute_metrics(pred):
     wer = wer_metric.compute(predictions=pred_str, references=label_str)
     return {"wer": wer}
 
-trainer = Trainer(
-    model=model,
-    data_collator=data_collator,
-    args=training_args,
-    compute_metrics=compute_metrics,
-    train_dataset=split_dataset["train"],
-    eval_dataset=split_dataset["test"],
-    tokenizer=processor.feature_extractor,
-)
+
+# Define objective function for Optuna hyperparameter optimization
+def objective(trial):
+    # Define hyperparameters to optimize
+    learning_rate = trial.suggest_loguniform("learning_rate", 1e-5, 1e-3)
+    per_device_train_batch_size = trial.suggest_categorical("per_device_train_batch_size", [2, 4, 8, 16, 32])
+    weight_decay = trial.suggest_loguniform("weight_decay", 1e-5, 1e-3)
+    num_train_epochs = trial.suggest_int("num_train_epochs", 3, 20)
+
+    model = Wav2Vec2ForCTC.from_pretrained(
+    "facebook/wav2vec2-base",
+    ctc_loss_reduction="mean",
+    pad_token_id=processor.tokenizer.pad_token_id,
+    )
 
 
-trainer.train()
-final_results = trainer.evaluate()
-print(f"Final Evaluation Results: {final_results}")
+    model.gradient_checkpointing_enable()
+    model.freeze_feature_encoder()
+
+    training_args = TrainingArguments(
+        output_dir="./wav2vec2-base-ivesa",
+        group_by_length=True,
+        per_device_train_batch_size=per_device_train_batch_size,
+        evaluation_strategy="steps",
+        num_train_epochs=num_train_epochs,
+        fp16=True,  # Enable fp16 (mixed precision training)
+        # optim = 'adafactor'
+        save_steps=500,
+        eval_steps=200,
+        logging_steps=100,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        warmup_steps=1000,
+        save_total_limit=2,
+    
+        
+    )
+
+
+    trainer = Trainer(
+        model=model,
+        data_collator=DataCollatorCTCWithPadding(processor=processor),
+        args=training_args,
+        train_dataset=split_dataset["train"],
+        eval_dataset=split_dataset["test"],
+        tokenizer=processor.feature_extractor,
+        compute_metrics=compute_metrics,  # Define your own compute_metrics function
+    )
+
+
+    trainer.train()
+
+    eval_results = trainer.evaluate()
+    print(f"Final Evaluation Results: {eval_results}")
+
+    # getting test data
+    for i in range(20):
+        i2 = processor(split_dataset['test'][i]["audio"]["array"], sampling_rate=16000, return_tensors="pt")
+        print(f"The input test audio is: {split_dataset['test'][i]['transcription']}")
+
+        # prediction for test data
+        with torch.no_grad():
+            logits = model(**i2.to("cpu")).logits
+
+        predicted_ids = torch.argmax(logits, dim=-1)
+        transcription = processor.batch_decode(predicted_ids)
+
+
+        print(f'The output prediction is : {transcription[0]}')
+
+    return eval_results["eval_loss"]  # Optuna minimizes this value
+
+
+# Perform hyperparameter optimization with Optuna
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=10)  # Adjust n_trials as needed
+
+# Print best hyperparameters found
+print("Best trial:")
+best_trial = study.best_trial
+print("  Value: {}".format(best_trial.value))
+print("  Params: ")
+for key, value in best_trial.params.items():
+    print("    {}: {}".format(key, value))
 
 
