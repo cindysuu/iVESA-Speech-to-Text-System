@@ -7,9 +7,6 @@ from evaluate import load
 from datasets import Dataset, Audio, load_metric
 from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec2Processor
 
-# Set the default device based on availability
-# device = "cuda" if torch.cuda.is_available() else "cpu"
-# print(f"Using device: {device}")
 CUDA_LAUNCH_BLOCKING=1
 
 
@@ -43,9 +40,11 @@ audio_data = [preprocess_audio(file) for file in audio_files]
 
 audio_data = [data for data in audio_data if data is not None]
 
+# Create test-train split
 if not audio_data:
     print("No valid audio data found.")
 else:
+    
     dataset = Dataset.from_dict({
         'audio': [item['audio'] for item in audio_data],
         'transcription': [item['transcription'] for item in audio_data]
@@ -54,6 +53,7 @@ else:
     split_dataset = dataset.train_test_split(test_size=0.4)
     split_dataset = split_dataset.cast_column("audio", Audio(sampling_rate=16000))
 
+    # Create vocab dictionary
     def extract_all_chars(batch):
         all_text = " ".join(batch['transcription'])
         vocab = list(set(all_text))
@@ -61,6 +61,7 @@ else:
    
     vocabs = split_dataset.map(extract_all_chars, batched=True, batch_size=-1, keep_in_memory=True, remove_columns=split_dataset["train"].column_names)
     vocab_list = list(set(vocabs["train"]["vocab"][0]) | set(vocabs["test"]["vocab"][0]))
+    
     # After creating audio_data and before creating dataset:
     print("Printing audio_data to inspect transcriptions:")
     for item in audio_data:
@@ -77,11 +78,11 @@ else:
 
     vocab_dict["[UNK]"] = len(vocab_dict)
     vocab_dict["[PAD]"] = len(vocab_dict)
-    print(vocab_dict)
 
     with open('vocab.json', 'w') as vocab_file:
         json.dump(vocab_dict, vocab_file)
 
+    # Create Wav2Vec2 processor from tokenizer and feature extractor
     tokenizer = Wav2Vec2CTCTokenizer("./vocab.json", unk_token="[UNK]", pad_token="[PAD]", word_delimiter_token="|")
     feature_extractor = Wav2Vec2FeatureExtractor(feature_size=1, sampling_rate=16000, padding_value=0.0, do_normalize=True, return_attention_mask=True)
     processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
@@ -102,6 +103,7 @@ import torch
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
+# Create custom data collator for Wav2Vec2
 @dataclass
 class DataCollatorCTCWithPadding:
     processor: Wav2Vec2Processor
@@ -142,24 +144,7 @@ data_collator = DataCollatorCTCWithPadding(processor=processor, padding=True)
 from transformers import TrainingArguments, Trainer, Wav2Vec2ForCTC
 import optuna
 
-training_args = TrainingArguments(
-    output_dir="./wav2vec2-base-ivesa",
-    group_by_length=True,
-    per_device_train_batch_size=32,
-    evaluation_strategy="steps",
-    num_train_epochs=30,
-    fp16=True,
-    # fp16=True if device == "cuda" else False,  # Enable fp16 only if using CUDA
-    save_steps=500,
-    eval_steps=200,
-    logging_steps=100,
-    learning_rate=1e-4,
-    weight_decay=0.005,
-    warmup_steps=1000,
-    save_total_limit=2,
-)
-
-
+# Initialize WER metric
 wer_metric = load("wer", trust_remote_code=True)
 
 def compute_metrics(pred):
@@ -195,6 +180,7 @@ def objective(trial):
     model.gradient_checkpointing_enable()
     model.freeze_feature_encoder()
 
+    # Initialize training arguments
     training_args = TrainingArguments(
         output_dir="./wav2vec2-base-ivesa",
         group_by_length=True,
@@ -214,7 +200,7 @@ def objective(trial):
         
     )
 
-
+    # Initialize trainer
     trainer = Trainer(
         model=model,
         data_collator=DataCollatorCTCWithPadding(processor=processor),
